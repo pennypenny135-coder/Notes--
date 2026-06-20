@@ -35,8 +35,8 @@ function topologicalSortNotebooks(notebooks: { id: string; parentId?: string | n
 //     batch doesn't create duplicate folders across multiple files.
 async function resolveOrCreateFolderPath(
   path: string,
-  liveNotebooks: Notebook[],               // passed in by reference; caller keeps this in sync
-  localCache: Map<string, string>,          // "name|parentId" → notebookId, accumulated this import run
+  liveNotebooks: Notebook[],
+  localCache: Map<string, string>,
   createNotebook: (name: string, parentId?: string | null) => Promise<{ id: string } | null>
 ): Promise<string | null> {
   const parts = path.split('/').map(p => p.trim()).filter(Boolean);
@@ -47,13 +47,11 @@ async function resolveOrCreateFolderPath(
   for (const part of parts) {
     const cacheKey = `${part.toLowerCase()}|${parentId ?? ''}`;
 
-    // 1. Check our in-run cache first (handles multiple files in the same batch)
     if (localCache.has(cacheKey)) {
       parentId = localCache.get(cacheKey)!;
       continue;
     }
 
-    // 2. Check existing notebooks in the store (handles re-import across sessions)
     const existing = liveNotebooks.find(
       n => n.name.toLowerCase() === part.toLowerCase() && (n.parentId ?? null) === parentId
     );
@@ -63,11 +61,9 @@ async function resolveOrCreateFolderPath(
       continue;
     }
 
-    // 3. Create it
     const created = await createNotebook(part, parentId);
     if (!created) return null;
     localCache.set(cacheKey, created.id);
-    // Append to the live list so subsequent parts in this path can find it
     liveNotebooks.push(created as Notebook);
     parentId = created.id;
   }
@@ -96,9 +92,7 @@ export function ImportModal({ onClose }: Props) {
     const errors: string[] = [];
     const currentNotes = useAppStore.getState().notes;
 
-    // Share one folder-dedup cache across ALL files in this batch
     const folderCache = new Map<string, string>();
-    // Use a mutable copy so newly-created notebooks are visible within this batch
     const liveNotebooks = [...useAppStore.getState().notebooks];
 
     for (const file of files) {
@@ -117,11 +111,12 @@ export function ImportModal({ onClose }: Props) {
             n => n.title.toLowerCase() === noteData.title.toLowerCase() && n.status !== 'trash'
           );
           if (existing) {
-            // Compare content — if different, update
             const contentChanged = existing.contentMd.trim() !== noteData.contentMd.trim();
-            if (contentChanged) {
+            const folderChanged = existing.notebookId !== notebookId;
+            if (contentChanged || folderChanged) {
               await updateNote(existing.id, {
                 contentMd: noteData.contentMd,
+                notebookId,
                 wordCount: noteData.wordCount,
                 charCount: noteData.charCount,
                 updatedAt: Date.now(),
@@ -161,7 +156,6 @@ export function ImportModal({ onClose }: Props) {
       const errors: string[] = [];
       const currentNotes = useAppStore.getState().notes;
 
-      // Reconstruct notebook tree
       const notebookMap = new Map<string, string>();
       const liveNotebooks = [...useAppStore.getState().notebooks];
       const folderCache = new Map<string, string>();
@@ -170,7 +164,6 @@ export function ImportModal({ onClose }: Props) {
       for (const nb of sorted) {
         const newParentId = nb.parentId ? (notebookMap.get(nb.parentId) ?? null) : null;
         const cacheKey = `${nb.name.toLowerCase()}|${newParentId ?? ''}`;
-        // Dedup: reuse existing
         const existing = liveNotebooks.find(
           n => n.name.toLowerCase() === nb.name.toLowerCase() && (n.parentId ?? null) === newParentId
         );
@@ -189,7 +182,6 @@ export function ImportModal({ onClose }: Props) {
         }
       }
 
-      // Import tags
       const tagMap = new Map<string, string>();
       for (const tag of backup.tags) {
         try {
@@ -198,18 +190,21 @@ export function ImportModal({ onClose }: Props) {
         } catch { /* skip */ }
       }
 
-      // Import notes
       for (const note of backup.notes) {
         try {
+          const resolvedNotebookId = note.notebookId ? (notebookMap.get(note.notebookId) ?? null) : null;
+
           if (mode === 'merge') {
             const existing = currentNotes.find(
               n => n.title.toLowerCase() === note.title.toLowerCase() && n.status !== 'trash'
             );
             if (existing) {
               const contentChanged = existing.contentMd.trim() !== (note.contentMd ?? '').trim();
-              if (contentChanged) {
+              const folderChanged = existing.notebookId !== resolvedNotebookId;
+              if (contentChanged || folderChanged) {
                 await updateNote(existing.id, {
                   contentMd: note.contentMd,
+                  notebookId: resolvedNotebookId,
                   updatedAt: Date.now(),
                 });
                 updated++;
@@ -223,7 +218,7 @@ export function ImportModal({ onClose }: Props) {
           const newNote = await createNote({
             title: note.title,
             contentMd: note.contentMd,
-            notebookId: note.notebookId ? (notebookMap.get(note.notebookId) ?? null) : null,
+            notebookId: resolvedNotebookId,
             status: note.status,
             isPinned: note.isPinned,
             isFavorite: note.isFavorite,
@@ -335,7 +330,7 @@ export function ImportModal({ onClose }: Props) {
                 </div>
                 <p className="text-xs text-muted mt-1.5">
                   {mode === 'merge'
-                    ? 'Same title → update content if changed, skip if identical.'
+                    ? 'Same title → update content & folder if changed, skip if identical.'
                     : 'Delete ALL existing notes, folders and tags before importing.'}
                 </p>
               </div>
