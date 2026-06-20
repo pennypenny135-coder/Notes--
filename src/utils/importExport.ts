@@ -101,14 +101,10 @@ export async function exportAsZip(
   includeAttachments = true
 ): Promise<Blob> {
   const zip = new JSZip();
-
-  // metadata.json — includes full folder tree so import can reconstruct
   const backup = { version: 1, exportedAt: new Date().toISOString(), notebooks, tags };
   zip.file('metadata.json', JSON.stringify(backup, null, 2));
 
   const tagMap = new Map(tags.map(t => [t.id, t.name]));
-
-  // Organise notes into folder sub-directories mirroring actual folder structure
   const notesFolder = zip.folder('notes')!;
   for (const note of notes) {
     const tagNames = note.tags.map(id => tagMap.get(id) ?? id);
@@ -116,14 +112,12 @@ export async function exportAsZip(
     const content = exportNoteAsMarkdown(note, tagNames, folderPath);
     const safeName = note.title.replace(/[<>:"/\\|?*]/g, '_').slice(0, 100);
     if (folderPath) {
-      const subFolder = notesFolder.folder(folderPath.replace(/\//g, '/'))!;
-      subFolder.file(`${safeName}.md`, content);
+      notesFolder.folder(folderPath)!.file(`${safeName}.md`, content);
     } else {
       notesFolder.file(`${safeName}.md`, content);
     }
   }
 
-  // attachments/
   if (includeAttachments && attachments.length > 0) {
     const attFolder = zip.folder('attachments')!;
     for (const att of attachments) {
@@ -145,7 +139,7 @@ export async function exportAsZip(
 export interface ImportedNote {
   note: Omit<Note, 'id' | 'createdAt' | 'updatedAt' | 'openedAt' | 'sortOrder' | 'tags'>;
   tagNames: string[];
-  folderPath?: string;   // e.g. "Work/Projects/Alpha"
+  folderPath?: string;
 }
 
 export function parseMarkdownFile(
@@ -166,7 +160,6 @@ export function parseMarkdownFile(
       .filter(Boolean);
   }
 
-  // folder from frontmatter takes precedence, then caller-supplied path
   const resolvedFolderPath = (meta.folder as string | undefined) || folderPath;
 
   return {
@@ -186,8 +179,8 @@ export function parseMarkdownFile(
   };
 }
 
-// ─── Resolve/create a folder path, return leaf notebookId ────────────────────
-// e.g. "Work/Projects/Alpha" → creates Work → Projects → Alpha, returns Alpha.id
+// ─── Resolve/create a folder path — reuse existing folders, create missing ones
+// Deduplicates: if a folder with the same name+parent already exists, reuse it.
 
 export async function resolveOrCreateFolderPath(
   path: string,
@@ -198,18 +191,22 @@ export async function resolveOrCreateFolderPath(
   if (!parts.length) return null;
 
   let parentId: string | null = null;
+  // We mutate a local copy so newly-created notebooks are visible in subsequent iterations
   let currentNotebooks = [...notebooks];
 
   for (const part of parts) {
+    // Case-insensitive dedup: reuse existing folder at this level
     const existing = currentNotebooks.find(
       n => n.name.toLowerCase() === part.toLowerCase() && (n.parentId ?? null) === parentId
     );
     if (existing) {
       parentId = existing.id;
     } else {
+      // Create only if it doesn't already exist
       const created = await createNotebook(part, parentId);
       if (!created) return null; // depth limit hit
       parentId = created.id;
+      // Add to local copy so next part can reference it
       currentNotebooks = [...currentNotebooks, created as Notebook];
     }
   }
@@ -241,4 +238,21 @@ export function readFileAsText(file: File): Promise<string> {
 
 export function sanitizeFilename(name: string): string {
   return name.replace(/[<>:"/\\|?*\0]/g, '_').slice(0, 100) || 'untitled';
+}
+
+// ─── Topological sort notebooks: parents before children ──────────────────────
+export function topologicalSortNotebooks(notebooks: { id: string; parentId?: string | null; name: string }[]) {
+  const result: typeof notebooks = [];
+  const visited = new Set<string>();
+  const visit = (nb: typeof notebooks[0]) => {
+    if (visited.has(nb.id)) return;
+    if (nb.parentId) {
+      const parent = notebooks.find(n => n.id === nb.parentId);
+      if (parent) visit(parent);
+    }
+    visited.add(nb.id);
+    result.push(nb);
+  };
+  notebooks.forEach(visit);
+  return result;
 }

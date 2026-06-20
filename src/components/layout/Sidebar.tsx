@@ -1,13 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Star, Clock, Trash2, FileText,
   ChevronRight, ChevronDown, Plus,
-  Folder, Settings, Keyboard, Hash
+  Folder, FolderOpen, Settings, Keyboard, Hash, RotateCcw, GripVertical
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { cn } from '../../utils/cn';
+import { db } from '../../db/database';
 import type { SidebarView } from '../../types';
-
 
 export function Sidebar() {
   const {
@@ -15,7 +15,7 @@ export function Sidebar() {
     sidebarCollapsed, setSidebarView, setActiveNotebook, setActiveTag,
     createNotebook, deleteNotebook, updateNotebook,
     setShowSettings, setShowShortcuts,
-    settings,
+    settings, loadAll,
   } = useAppStore();
 
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -25,6 +25,14 @@ export function Sidebar() {
   const [newSubFolderName, setNewSubFolderName] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetStep, setResetStep] = useState<1 | 2>(1);
+  const [resetting, setResetting] = useState(false);
+
+  // Drag-to-reorder/reparent state
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null); // null = root
+  const [dragOverRoot, setDragOverRoot] = useState(false);
 
   const trashCount = notes.filter(n => n.status === 'trash').length;
   const activeNotes = notes.filter(n => n.status !== 'trash');
@@ -37,11 +45,10 @@ export function Sidebar() {
     label: string,
     icon: React.ReactNode,
     count?: number,
-    extraAction?: () => void
   ) => (
     <button
       key={view}
-      onClick={() => { setSidebarView(view); setActiveNotebook(null); setActiveTag(null); extraAction?.(); }}
+      onClick={() => { setSidebarView(view); setActiveNotebook(null); setActiveTag(null); }}
       className={cn(
         'w-full flex items-center gap-2 px-3 py-1.5 rounded-md text-sm transition-colors group',
         sidebarView === view && !activeNotebookId && !activeTagId
@@ -69,7 +76,6 @@ export function Sidebar() {
     await createNotebook(newSubFolderName.trim(), parentId);
     setNewSubFolderName('');
     setAddingSubFolderParentId(null);
-    // Auto-expand parent
     setExpandedFolders(s => { const n = new Set(s); n.add(parentId); return n; });
   };
 
@@ -79,7 +85,23 @@ export function Sidebar() {
     setRenamingId(null);
   };
 
-  // Helper: get folder depth (root = 1)
+  // Reset All
+  const handleResetAll = async () => {
+    setResetting(true);
+    try {
+      await db.notes.clear();
+      await db.notebooks.clear();
+      await db.tags.clear();
+      await db.attachments.clear();
+      await loadAll();
+    } finally {
+      setResetting(false);
+      setShowResetConfirm(false);
+      setResetStep(1);
+    }
+  };
+
+  // Depth helper
   const getFolderDepth = (folderId: string): number => {
     let depth = 0;
     let current: string | null = folderId;
@@ -92,6 +114,34 @@ export function Sidebar() {
     return depth;
   };
 
+  // Would moving `sourceId` under `targetParentId` create a cycle or exceed depth?
+  const isValidMove = (sourceId: string, targetParentId: string | null): boolean => {
+    if (targetParentId === null) return true;
+    if (targetParentId === sourceId) return false;
+    // check targetParentId is not a descendant of sourceId
+    let cur: string | null = targetParentId;
+    while (cur) {
+      if (cur === sourceId) return false;
+      cur = notebooks.find(n => n.id === cur)?.parentId ?? null;
+    }
+    // depth check: target depth + 1 (source becomes child) must be <= 3
+    const targetDepth = getFolderDepth(targetParentId);
+    return targetDepth < 3;
+  };
+
+  const handleFolderDrop = async (targetParentId: string | null) => {
+    if (!draggingId) return;
+    if (targetParentId === draggingId) return;
+    if (!isValidMove(draggingId, targetParentId)) return;
+    await updateNotebook(draggingId, { parentId: targetParentId });
+    if (targetParentId) {
+      setExpandedFolders(s => { const n = new Set(s); n.add(targetParentId); return n; });
+    }
+    setDraggingId(null);
+    setDragOverId(null);
+    setDragOverRoot(false);
+  };
+
   const rootFolders = notebooks.filter(n => !n.parentId);
   const childFolders = (parentId: string) => notebooks.filter(n => n.parentId === parentId);
 
@@ -101,17 +151,28 @@ export function Sidebar() {
     const isExpanded = expandedFolders.has(nb.id);
     const isActive = activeNotebookId === nb.id;
     const noteCount = activeNotes.filter(n => n.notebookId === nb.id).length;
-    const currentDepth = getFolderDepth(nb.id); // 1, 2, or 3
+    const currentDepth = getFolderDepth(nb.id);
     const canAddSubFolder = currentDepth < 3;
+    const isDragOver = dragOverId === nb.id;
+    const isDragging = draggingId === nb.id;
 
     return (
       <div key={nb.id}>
         <div
+          draggable
+          onDragStart={e => { e.stopPropagation(); setDraggingId(nb.id); }}
+          onDragEnd={() => { setDraggingId(null); setDragOverId(null); setDragOverRoot(false); }}
+          onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDragOverId(nb.id); setDragOverRoot(false); }}
+          onDragLeave={e => { e.stopPropagation(); setDragOverId(null); }}
+          onDrop={e => { e.preventDefault(); e.stopPropagation(); handleFolderDrop(nb.id); }}
           className={cn(
             'group flex items-center gap-1 px-2 py-1 rounded-md cursor-pointer text-sm transition-colors',
-            isActive
-              ? 'bg-accent text-accent-fg font-medium'
-              : 'text-muted hover:text-fg hover:bg-surface-hover'
+            isDragging && 'opacity-40',
+            isDragOver && draggingId !== nb.id
+              ? 'bg-accent/20 ring-1 ring-accent'
+              : isActive
+                ? 'bg-accent text-accent-fg font-medium'
+                : 'text-muted hover:text-fg hover:bg-surface-hover'
           )}
           style={{ paddingLeft: `${8 + depth * 14}px` }}
           onClick={() => {
@@ -120,7 +181,9 @@ export function Sidebar() {
             setActiveTag(null);
           }}
         >
-          {(hasChildren || children.length > 0) ? (
+          {/* Drag handle */}
+          <GripVertical size={11} className="flex-shrink-0 opacity-0 group-hover:opacity-30 cursor-grab mr-0.5" />
+          {hasChildren ? (
             <button
               onClick={e => { e.stopPropagation(); setExpandedFolders(s => { const n = new Set(s); n.has(nb.id) ? n.delete(nb.id) : n.add(nb.id); return n; }); }}
               className="flex-shrink-0 w-3 h-3"
@@ -130,7 +193,9 @@ export function Sidebar() {
           ) : (
             <span className="w-3" />
           )}
-          <Folder size={13} className="flex-shrink-0" />
+          {isActive || isDragOver
+            ? <FolderOpen size={13} className="flex-shrink-0" />
+            : <Folder size={13} className="flex-shrink-0" />}
           {renamingId === nb.id ? (
             <input
               autoFocus
@@ -170,7 +235,6 @@ export function Sidebar() {
             >✕</button>
           </div>
         </div>
-        {/* Subfolder creation input */}
         {addingSubFolderParentId === nb.id && (
           <div className="flex items-center gap-1 py-1" style={{ paddingLeft: `${8 + (depth + 1) * 14}px` }}>
             <Folder size={13} className="text-muted flex-shrink-0" />
@@ -230,6 +294,18 @@ export function Sidebar() {
               <Plus size={13} />
             </button>
           </div>
+
+          {/* Root drop zone — drag folder here to make it a root folder */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOverRoot(true); setDragOverId(null); }}
+            onDragLeave={() => setDragOverRoot(false)}
+            onDrop={e => { e.preventDefault(); handleFolderDrop(null); }}
+            className={cn(
+              'rounded-md transition-colors mb-0.5',
+              dragOverRoot && draggingId ? 'bg-accent/10 ring-1 ring-accent/40 h-5' : 'h-0'
+            )}
+          />
+
           {rootFolders.map(nb => renderFolder(nb))}
           {addingFolder && (
             <div className="flex items-center gap-1 px-2 py-1">
@@ -289,12 +365,18 @@ export function Sidebar() {
 
         <div className="border-t border-border my-2" />
 
-        {/* Trash */}
         {navItem('trash', 'Trash', <Trash2 size={14} />, trashCount)}
       </div>
 
       {/* Bottom actions */}
       <div className="border-t border-border px-2 py-2 flex gap-1 flex-shrink-0">
+        <button
+          onClick={() => { setShowResetConfirm(true); setResetStep(1); }}
+          className="p-1.5 rounded-md text-xs text-muted hover:text-red-400 hover:bg-red-400/10 transition-colors"
+          title="Reset all data"
+        >
+          <RotateCcw size={13} />
+        </button>
         <button
           onClick={() => setShowShortcuts(true)}
           className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-xs text-muted hover:text-fg hover:bg-surface-hover transition-colors"
@@ -312,6 +394,59 @@ export function Sidebar() {
           Settings
         </button>
       </div>
+
+      {/* Reset All confirm modal */}
+      {showResetConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={() => { setShowResetConfirm(false); setResetStep(1); }}
+        >
+          <div
+            className="bg-surface border border-border rounded-xl shadow-2xl w-full max-w-sm mx-4 p-5"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-500/10 mx-auto mb-3">
+              <RotateCcw size={22} className="text-red-500" />
+            </div>
+            {resetStep === 1 ? (
+              <>
+                <h3 className="font-semibold text-fg text-center mb-1">Reset all data?</h3>
+                <p className="text-xs text-muted text-center mb-4">
+                  This will <strong className="text-red-400">permanently delete</strong> all notes, folders, tags and attachments. This action cannot be undone.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setShowResetConfirm(false); setResetStep(1); }}
+                    className="flex-1 py-2 rounded-lg border border-border text-sm text-fg hover:bg-surface-hover transition-colors"
+                  >Cancel</button>
+                  <button
+                    onClick={() => setResetStep(2)}
+                    className="flex-1 py-2 rounded-lg bg-red-500/20 text-red-400 text-sm hover:bg-red-500/30 transition-colors"
+                  >Continue →</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 className="font-semibold text-fg text-center mb-1">Are you absolutely sure?</h3>
+                <p className="text-xs text-muted text-center mb-4">
+                  All your data will be <strong className="text-red-500">wiped completely</strong> and cannot be recovered. Export a backup first if needed.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setShowResetConfirm(false); setResetStep(1); }}
+                    className="flex-1 py-2 rounded-lg border border-border text-sm text-fg hover:bg-surface-hover transition-colors"
+                  >Cancel</button>
+                  <button
+                    onClick={handleResetAll}
+                    disabled={resetting}
+                    className="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm hover:bg-red-600 transition-colors disabled:opacity-50"
+                  >{resetting ? 'Resetting…' : 'Yes, Reset Everything'}</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </aside>
   );
 }
