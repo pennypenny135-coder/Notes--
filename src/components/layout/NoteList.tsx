@@ -1,9 +1,10 @@
 import React, { useMemo, useState, useCallback } from 'react';
-import { Pin, Star, FileText, Copy, Trash2, StarOff, CheckSquare, Square, X } from 'lucide-react';
+import { Pin, Star, FileText, Copy, Trash2, StarOff, CheckSquare, Square, X, FolderInput } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { cn } from '../../utils/cn';
 import { searchNotes } from '../../utils/search';
 import { formatDate, extractPreview } from '../../utils/text';
+import { MoveNoteModal } from '../modals/MoveNoteModal';
 import type { Note } from '../../types';
 
 export function NoteList() {
@@ -18,6 +19,7 @@ export function NoteList() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [moveNoteId, setMoveNoteId] = useState<string | null>(null);
 
   const tagMap = useMemo(() => new Map(tags.map(t => [t.id, t])), [tags]);
 
@@ -202,7 +204,19 @@ export function NoteList() {
           }}
           onPin={async (pinned) => { await pinNote(contextMenu.noteId, pinned); closeContextMenu(); }}
           onFavorite={async (fav) => { await favoriteNote(contextMenu.noteId, fav); closeContextMenu(); }}
+          onMoveToFolder={() => {
+            setMoveNoteId(contextMenu.noteId);
+            closeContextMenu();
+          }}
           note={notes.find(n => n.id === contextMenu.noteId)!}
+        />
+      )}
+
+      {/* Move to Folder modal */}
+      {moveNoteId && (
+        <MoveNoteModal
+          noteId={moveNoteId}
+          onClose={() => setMoveNoteId(null)}
         />
       )}
 
@@ -328,16 +342,17 @@ interface ContextMenuProps {
   onDuplicate: () => void;
   onPin: (pinned: boolean) => void;
   onFavorite: (fav: boolean) => void;
+  onMoveToFolder: () => void;
 }
 
-function ContextMenu({ x, y, note, onClose, onDelete, onDuplicate, onPin, onFavorite }: ContextMenuProps) {
+function ContextMenu({ x, y, note, onClose, onDelete, onDuplicate, onPin, onFavorite, onMoveToFolder }: ContextMenuProps) {
   if (!note) return null;
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="fixed z-50 bg-surface border border-border rounded-lg shadow-lg py-1 min-w-[160px] text-sm"
-        style={{ left: Math.min(x, window.innerWidth - 170), top: Math.min(y, window.innerHeight - 160) }}
+        className="fixed z-50 bg-surface border border-border rounded-lg shadow-lg py-1 min-w-[170px] text-sm"
+        style={{ left: Math.min(x, window.innerWidth - 180), top: Math.min(y, window.innerHeight - 200) }}
       >
         <button
           onClick={() => onPin(!note.isPinned)}
@@ -357,6 +372,12 @@ function ContextMenu({ x, y, note, onClose, onDelete, onDuplicate, onPin, onFavo
           className="w-full px-3 py-1.5 text-left hover:bg-surface-hover flex items-center gap-2 text-fg"
         >
           <Copy size={13} /> Duplicate
+        </button>
+        <button
+          onClick={onMoveToFolder}
+          className="w-full px-3 py-1.5 text-left hover:bg-surface-hover flex items-center gap-2 text-fg"
+        >
+          <FolderInput size={13} /> Move to Folder
         </button>
         <div className="border-t border-border my-1" />
         <button
