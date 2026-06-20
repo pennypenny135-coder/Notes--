@@ -58,7 +58,7 @@ export interface Note {
 
 // ─── UI State Types ─────────────────────────────────────────────────────────
 
-export type SidebarView = 'notebooks' | 'tags' | 'all' | 'favorites' | 'recent' | 'trash' | 'daily';
+export type SidebarView = 'notebooks' | 'tags' | 'all' | 'favorites' | 'recent' | 'trash';
 
 export type EditorMode = 'split' | 'edit' | 'preview';
 

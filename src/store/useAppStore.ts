@@ -59,8 +59,8 @@ interface AppState {
   favoriteNote: (id: string, fav: boolean) => Promise<void>;
   setActiveNote: (id: string | null) => Promise<void>;
 
-  // Notebook actions
-  createNotebook: (name: string, parentId?: string | null) => Promise<Notebook>;
+  // Folder actions
+  createNotebook: (name: string, parentId?: string | null) => Promise<Notebook | null>;
   updateNotebook: (id: string, partial: Partial<Notebook>) => Promise<void>;
   deleteNotebook: (id: string) => Promise<void>;
 
@@ -106,6 +106,21 @@ const defaultSettings: AppSettings = {
   defaultNotebookId: null,
   spellcheck: false,
 };
+
+// ─── Helper: get folder depth (root = 1) ────────────────────────────────────
+
+function getFolderDepth(notebooks: Notebook[], folderId: string | null): number {
+  if (!folderId) return 0;
+  let depth = 0;
+  let current: string | null = folderId;
+  while (current) {
+    depth++;
+    const parent = notebooks.find(n => n.id === current);
+    current = parent?.parentId ?? null;
+    if (depth > 10) break; // safety guard
+  }
+  return depth;
+}
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 
@@ -296,9 +311,16 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      // ── Notebooks ─────────────────────────────────────────────────────────
+      // ── Folders ───────────────────────────────────────────────────────────
 
       createNotebook: async (name, parentId = null) => {
+        const { notebooks } = get();
+        // Enforce max 3 levels: root=1, child=2, grandchild=3
+        const parentDepth = getFolderDepth(notebooks, parentId);
+        if (parentDepth >= 3) {
+          alert('Maximum folder depth is 3 levels.');
+          return null;
+        }
         const now = Date.now();
         const nb: Notebook = {
           id: generateId(),

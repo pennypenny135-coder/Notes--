@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Star, Clock, Trash2, FileText,
-  ChevronRight, ChevronDown, Plus, Calendar,
+  ChevronRight, ChevronDown, Plus,
   Folder, Settings, Keyboard, Hash
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
@@ -18,9 +18,11 @@ export function Sidebar() {
     settings,
   } = useAppStore();
 
-  const [expandedNotebooks, setExpandedNotebooks] = useState<Set<string>>(new Set());
-  const [newNotebookName, setNewNotebookName] = useState('');
-  const [addingNotebook, setAddingNotebook] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [newFolderName, setNewFolderName] = useState('');
+  const [addingFolder, setAddingFolder] = useState(false);
+  const [addingSubFolderParentId, setAddingSubFolderParentId] = useState<string | null>(null);
+  const [newSubFolderName, setNewSubFolderName] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
 
@@ -55,28 +57,52 @@ export function Sidebar() {
     </button>
   );
 
-  const handleCreateNotebook = async () => {
-    if (!newNotebookName.trim()) return;
-    await createNotebook(newNotebookName.trim());
-    setNewNotebookName('');
-    setAddingNotebook(false);
+  const handleCreateFolder = async () => {
+    if (!newFolderName.trim()) return;
+    await createNotebook(newFolderName.trim(), null);
+    setNewFolderName('');
+    setAddingFolder(false);
   };
 
-  const handleRenameNotebook = async (id: string) => {
+  const handleCreateSubFolder = async (parentId: string) => {
+    if (!newSubFolderName.trim()) return;
+    await createNotebook(newSubFolderName.trim(), parentId);
+    setNewSubFolderName('');
+    setAddingSubFolderParentId(null);
+    // Auto-expand parent
+    setExpandedFolders(s => { const n = new Set(s); n.add(parentId); return n; });
+  };
+
+  const handleRenameFolder = async (id: string) => {
     if (!renameValue.trim()) return;
     await updateNotebook(id, { name: renameValue.trim() });
     setRenamingId(null);
   };
 
-  const rootNotebooks = notebooks.filter(n => !n.parentId);
-  const childNotebooks = (parentId: string) => notebooks.filter(n => n.parentId === parentId);
+  // Helper: get folder depth (root = 1)
+  const getFolderDepth = (folderId: string): number => {
+    let depth = 0;
+    let current: string | null = folderId;
+    while (current) {
+      depth++;
+      const parent = notebooks.find(n => n.id === current);
+      current = parent?.parentId ?? null;
+      if (depth > 10) break;
+    }
+    return depth;
+  };
 
-  const renderNotebook = (nb: typeof notebooks[0], depth = 0) => {
-    const children = childNotebooks(nb.id);
-    const hasChildren = children.length > 0;
-    const isExpanded = expandedNotebooks.has(nb.id);
+  const rootFolders = notebooks.filter(n => !n.parentId);
+  const childFolders = (parentId: string) => notebooks.filter(n => n.parentId === parentId);
+
+  const renderFolder = (nb: typeof notebooks[0], depth = 0) => {
+    const children = childFolders(nb.id);
+    const hasChildren = children.length > 0 || addingSubFolderParentId === nb.id;
+    const isExpanded = expandedFolders.has(nb.id);
     const isActive = activeNotebookId === nb.id;
     const noteCount = activeNotes.filter(n => n.notebookId === nb.id).length;
+    const currentDepth = getFolderDepth(nb.id); // 1, 2, or 3
+    const canAddSubFolder = currentDepth < 3;
 
     return (
       <div key={nb.id}>
@@ -94,9 +120,9 @@ export function Sidebar() {
             setActiveTag(null);
           }}
         >
-          {hasChildren ? (
+          {(hasChildren || children.length > 0) ? (
             <button
-              onClick={e => { e.stopPropagation(); setExpandedNotebooks(s => { const n = new Set(s); n.has(nb.id) ? n.delete(nb.id) : n.add(nb.id); return n; }); }}
+              onClick={e => { e.stopPropagation(); setExpandedFolders(s => { const n = new Set(s); n.has(nb.id) ? n.delete(nb.id) : n.add(nb.id); return n; }); }}
               className="flex-shrink-0 w-3 h-3"
             >
               {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -110,9 +136,9 @@ export function Sidebar() {
               autoFocus
               value={renameValue}
               onChange={e => setRenameValue(e.target.value)}
-              onBlur={() => handleRenameNotebook(nb.id)}
+              onBlur={() => handleRenameFolder(nb.id)}
               onKeyDown={e => {
-                if (e.key === 'Enter') handleRenameNotebook(nb.id);
+                if (e.key === 'Enter') handleRenameFolder(nb.id);
                 if (e.key === 'Escape') setRenamingId(null);
               }}
               onClick={e => e.stopPropagation()}
@@ -123,17 +149,46 @@ export function Sidebar() {
           )}
           <span className="text-xs opacity-50 group-hover:opacity-70">{noteCount || ''}</span>
           <div className="hidden group-hover:flex gap-0.5 ml-1">
+            {canAddSubFolder && (
+              <button
+                onClick={e => {
+                  e.stopPropagation();
+                  setAddingSubFolderParentId(nb.id);
+                  setExpandedFolders(s => { const n = new Set(s); n.add(nb.id); return n; });
+                }}
+                className="p-0.5 rounded hover:bg-surface-hover text-muted"
+                title="New subfolder"
+              >＋</button>
+            )}
             <button
               onClick={e => { e.stopPropagation(); setRenamingId(nb.id); setRenameValue(nb.name); }}
               className="p-0.5 rounded hover:bg-surface-hover text-muted"
             >✎</button>
             <button
-              onClick={e => { e.stopPropagation(); if (confirm(`Delete notebook "${nb.name}"?`)) deleteNotebook(nb.id); }}
+              onClick={e => { e.stopPropagation(); if (confirm(`Delete folder "${nb.name}"?`)) deleteNotebook(nb.id); }}
               className="p-0.5 rounded hover:bg-surface-hover text-red-400"
             >✕</button>
           </div>
         </div>
-        {isExpanded && children.map(c => renderNotebook(c, depth + 1))}
+        {/* Subfolder creation input */}
+        {addingSubFolderParentId === nb.id && (
+          <div className="flex items-center gap-1 py-1" style={{ paddingLeft: `${8 + (depth + 1) * 14}px` }}>
+            <Folder size={13} className="text-muted flex-shrink-0" />
+            <input
+              autoFocus
+              value={newSubFolderName}
+              onChange={e => setNewSubFolderName(e.target.value)}
+              onBlur={() => { setAddingSubFolderParentId(null); setNewSubFolderName(''); }}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleCreateSubFolder(nb.id);
+                if (e.key === 'Escape') { setAddingSubFolderParentId(null); setNewSubFolderName(''); }
+              }}
+              placeholder="Subfolder name..."
+              className="flex-1 bg-surface-hover border border-border rounded px-1.5 py-0.5 text-sm outline-none text-fg min-w-0"
+            />
+          </div>
+        )}
+        {isExpanded && children.map(c => renderFolder(c, depth + 1))}
       </div>
     );
   };
@@ -159,43 +214,42 @@ export function Sidebar() {
           {navItem('all', 'All Notes', <FileText size={14} />, activeNotes.length)}
           {navItem('recent', 'Recent', <Clock size={14} />)}
           {navItem('favorites', 'Favorites', <Star size={14} />, activeNotes.filter(n => n.isFavorite).length)}
-          {navItem('daily', 'Daily Notes', <Calendar size={14} />)}
         </div>
 
         <div className="border-t border-border my-2" />
 
-        {/* Notebooks */}
+        {/* Folders */}
         <div>
           <div className="flex items-center justify-between px-2 mb-1">
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted">Notebooks</span>
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted">Folders</span>
             <button
-              onClick={() => setAddingNotebook(true)}
+              onClick={() => setAddingFolder(true)}
               className="p-0.5 rounded hover:bg-surface-hover text-muted hover:text-fg transition-colors"
-              title="New notebook"
+              title="New folder"
             >
               <Plus size={13} />
             </button>
           </div>
-          {rootNotebooks.map(nb => renderNotebook(nb))}
-          {addingNotebook && (
+          {rootFolders.map(nb => renderFolder(nb))}
+          {addingFolder && (
             <div className="flex items-center gap-1 px-2 py-1">
               <Folder size={13} className="text-muted flex-shrink-0" />
               <input
                 autoFocus
-                value={newNotebookName}
-                onChange={e => setNewNotebookName(e.target.value)}
-                onBlur={() => { setAddingNotebook(false); setNewNotebookName(''); }}
+                value={newFolderName}
+                onChange={e => setNewFolderName(e.target.value)}
+                onBlur={() => { setAddingFolder(false); setNewFolderName(''); }}
                 onKeyDown={e => {
-                  if (e.key === 'Enter') handleCreateNotebook();
-                  if (e.key === 'Escape') { setAddingNotebook(false); setNewNotebookName(''); }
+                  if (e.key === 'Enter') handleCreateFolder();
+                  if (e.key === 'Escape') { setAddingFolder(false); setNewFolderName(''); }
                 }}
-                placeholder="Notebook name..."
+                placeholder="Folder name..."
                 className="flex-1 bg-surface-hover border border-border rounded px-1.5 py-0.5 text-sm outline-none text-fg min-w-0"
               />
             </div>
           )}
-          {rootNotebooks.length === 0 && !addingNotebook && (
-            <p className="text-xs text-muted px-2 py-1 italic">No notebooks yet</p>
+          {rootFolders.length === 0 && !addingFolder && (
+            <p className="text-xs text-muted px-2 py-1 italic">No folders yet</p>
           )}
         </div>
 
