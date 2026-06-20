@@ -1,10 +1,9 @@
-import React, { useMemo, useState } from 'react';
-import { Pin, Star, FileText, Copy, Trash2, StarOff } from 'lucide-react';
+import React, { useMemo, useState, useCallback } from 'react';
+import { Pin, Star, FileText, Copy, Trash2, StarOff, CheckSquare, Square, X } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { cn } from '../../utils/cn';
 import { searchNotes } from '../../utils/search';
 import { formatDate, extractPreview } from '../../utils/text';
-import React from 'react';
 import type { Note } from '../../types';
 
 export function NoteList() {
@@ -16,42 +15,37 @@ export function NoteList() {
   } = useAppStore();
 
   const [contextMenu, setContextMenu] = useState<{ noteId: string; x: number; y: number } | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const tagMap = useMemo(() => new Map(tags.map(t => [t.id, t])), [tags]);
 
   const filtered = useMemo(() => {
     let pool = notes.filter(n => {
-      // trash view
       if (sidebarView === 'trash') return n.status === 'trash';
       if (n.status === 'trash') return false;
-
-      // view filter
       if (sidebarView === 'favorites') return n.isFavorite;
       if (sidebarView === 'recent') return true;
-      if (sidebarView === 'daily') return /^\d{4}-\d{2}-\d{2}$/.test(n.title);
       if (sidebarView === 'notebooks' && activeNotebookId) return n.notebookId === activeNotebookId;
       if (sidebarView === 'tags' && activeTagId) return n.tags.includes(activeTagId);
       return true;
     });
 
-    // Search
     if (searchFilter.query.trim()) {
       pool = searchNotes(pool, tags, searchFilter.query);
     }
 
-    // Sort
     pool = [...pool].sort((a, b) => {
       let va: string | number = 0, vb: string | number = 0;
       if (sortOrder === 'title') { va = a.title.toLowerCase(); vb = b.title.toLowerCase(); }
       else if (sortOrder === 'createdAt') { va = a.createdAt; vb = b.createdAt; }
       else if (sortOrder === 'wordCount') { va = a.wordCount; vb = b.wordCount; }
       else { va = a.updatedAt; vb = b.updatedAt; }
-
       const cmp = va < vb ? -1 : va > vb ? 1 : 0;
       return sortDir === 'asc' ? cmp : -cmp;
     });
 
-    // Pinned first (only for non-trash)
     if (sidebarView !== 'trash') {
       const pinned = pool.filter(n => n.isPinned);
       const rest = pool.filter(n => !n.isPinned);
@@ -61,6 +55,7 @@ export function NoteList() {
   }, [notes, tags, sidebarView, activeNotebookId, activeTagId, searchFilter, sortOrder, sortDir]);
 
   const handleContextMenu = (e: React.MouseEvent, noteId: string) => {
+    if (selectMode) return;
     e.preventDefault();
     setContextMenu({ noteId, x: e.clientX, y: e.clientY });
   };
@@ -69,6 +64,37 @@ export function NoteList() {
 
   const getNotebookName = (id: string | null) =>
     id ? notebooks.find(n => n.id === id)?.name : null;
+
+  const toggleSelectMode = useCallback(() => {
+    setSelectMode(v => !v);
+    setSelectedIds(new Set());
+    setContextMenu(null);
+  }, []);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback(() => {
+    setSelectedIds(new Set(filtered.map(n => n.id)));
+  }, [filtered]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleBulkDelete = useCallback(async () => {
+    setShowConfirm(false);
+    for (const id of selectedIds) {
+      await deleteNote(id);
+    }
+    setSelectedIds(new Set());
+    setSelectMode(false);
+  }, [selectedIds, deleteNote]);
 
   if (listCollapsed) return null;
 
@@ -80,10 +106,49 @@ export function NoteList() {
     >
       {/* List header */}
       <div className="px-3 py-2 border-b border-border flex-shrink-0">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-semibold text-muted uppercase tracking-wider">
-            {filtered.length} note{filtered.length !== 1 ? 's' : ''}
+            {selectMode
+              ? `${selectedIds.size} selected`
+              : `${filtered.length} note${filtered.length !== 1 ? 's' : ''}`}
           </span>
+          <div className="flex items-center gap-1">
+            {selectMode ? (
+              <>
+                <button
+                  onClick={e => { e.stopPropagation(); selectAll(); }}
+                  className="text-[10px] px-2 py-0.5 rounded bg-surface-hover text-muted hover:text-fg transition-colors"
+                >All</button>
+                <button
+                  onClick={e => { e.stopPropagation(); clearSelection(); }}
+                  className="text-[10px] px-2 py-0.5 rounded bg-surface-hover text-muted hover:text-fg transition-colors"
+                >None</button>
+                {selectedIds.size > 0 && (
+                  <button
+                    onClick={e => { e.stopPropagation(); setShowConfirm(true); }}
+                    className="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors flex items-center gap-1"
+                  >
+                    <Trash2 size={10} /> Delete {selectedIds.size}
+                  </button>
+                )}
+                <button
+                  onClick={e => { e.stopPropagation(); toggleSelectMode(); }}
+                  className="p-0.5 rounded hover:bg-surface-hover text-muted hover:text-fg transition-colors"
+                  title="Exit select mode"
+                >
+                  <X size={13} />
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={e => { e.stopPropagation(); toggleSelectMode(); }}
+                className="p-0.5 rounded hover:bg-surface-hover text-muted hover:text-fg transition-colors"
+                title="Select notes"
+              >
+                <CheckSquare size={13} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -106,7 +171,15 @@ export function NoteList() {
                 isActive={activeNoteId === note.id}
                 tagMap={tagMap}
                 notebookName={getNotebookName(note.notebookId)}
-                onClick={() => setActiveNote(note.id)}
+                selectMode={selectMode}
+                isSelected={selectedIds.has(note.id)}
+                onClick={() => {
+                  if (selectMode) {
+                    toggleSelect(note.id);
+                  } else {
+                    setActiveNote(note.id);
+                  }
+                }}
                 onContextMenu={(e) => handleContextMenu(e, note.id)}
               />
             ))}
@@ -132,38 +205,79 @@ export function NoteList() {
           note={notes.find(n => n.id === contextMenu.noteId)!}
         />
       )}
+
+      {/* Bulk delete confirm dialog */}
+      {showConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+          onClick={() => setShowConfirm(false)}
+        >
+          <div
+            className="bg-surface border border-border rounded-xl shadow-xl p-5 w-72 text-center"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-red-500/10 mx-auto mb-3">
+              <Trash2 size={18} className="text-red-500" />
+            </div>
+            <h3 className="font-semibold text-fg mb-1">Delete {selectedIds.size} note{selectedIds.size !== 1 ? 's' : ''}?</h3>
+            <p className="text-xs text-muted mb-4">These notes will be moved to Trash. This cannot be undone easily.</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="flex-1 py-1.5 rounded-lg border border-border text-sm text-fg hover:bg-surface-hover transition-colors"
+              >Cancel</button>
+              <button
+                onClick={handleBulkDelete}
+                className="flex-1 py-1.5 rounded-lg bg-red-500 text-white text-sm hover:bg-red-600 transition-colors"
+              >Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// ─── Note List Item ───────────────────────────────────────────────────────────
+// ─── Note List Item ────────────────────────────────────────────────────────────
 
 interface NoteListItemProps {
   note: Note;
   isActive: boolean;
   tagMap: Map<string, { name: string; color?: string }>;
   notebookName: string | null | undefined;
+  selectMode: boolean;
+  isSelected: boolean;
   onClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }
 
-function NoteListItem({ note, isActive, tagMap, notebookName, onClick, onContextMenu }: NoteListItemProps) {
+function NoteListItem({ note, isActive, tagMap, notebookName, selectMode, isSelected, onClick, onContextMenu }: NoteListItemProps) {
   const preview = extractPreview(note.contentMd, 120);
 
   return (
     <div
       className={cn(
         'px-3 py-2.5 cursor-pointer border-b border-border/50 transition-colors group',
-        isActive
-          ? 'bg-accent/15 border-l-2 border-l-accent'
-          : 'hover:bg-surface-hover border-l-2 border-l-transparent'
+        isSelected
+          ? 'bg-accent/20 border-l-2 border-l-accent'
+          : isActive && !selectMode
+            ? 'bg-accent/15 border-l-2 border-l-accent'
+            : 'hover:bg-surface-hover border-l-2 border-l-transparent'
       )}
       onClick={onClick}
       onContextMenu={onContextMenu}
     >
       <div className="flex items-start gap-1.5 mb-0.5">
-        {note.isPinned && <Pin size={10} className="text-amber-500 flex-shrink-0 mt-1" />}
-        {note.isFavorite && <Star size={10} className="text-amber-400 fill-amber-400 flex-shrink-0 mt-1" />}
+        {selectMode ? (
+          <span className="flex-shrink-0 mt-0.5 text-accent">
+            {isSelected ? <CheckSquare size={13} /> : <Square size={13} className="text-muted" />}
+          </span>
+        ) : (
+          <>
+            {note.isPinned && <Pin size={10} className="text-amber-500 flex-shrink-0 mt-1" />}
+            {note.isFavorite && <Star size={10} className="text-amber-400 fill-amber-400 flex-shrink-0 mt-1" />}
+          </>
+        )}
         <span className={cn(
           'text-sm font-medium leading-tight flex-1 min-w-0 truncate',
           isActive ? 'text-fg' : 'text-fg/90'
@@ -202,7 +316,7 @@ function NoteListItem({ note, isActive, tagMap, notebookName, onClick, onContext
   );
 }
 
-// ─── Context Menu ─────────────────────────────────────────────────────────────
+// ─── Context Menu ───────────────────────────────────────────────────────────────
 
 interface ContextMenuProps {
   noteId: string;
