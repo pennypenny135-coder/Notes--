@@ -117,12 +117,28 @@ function getFolderDepth(notebooks: Notebook[], folderId: string | null): number 
     depth++;
     const parent = notebooks.find(n => n.id === current);
     current = parent?.parentId ?? null;
-    if (depth > 10) break; // safety guard
+    if (depth > 10) break;
   }
   return depth;
 }
 
-// ─── Helper: remove orphan tags (tags with no active notes) ─────────────────
+// ─── Helper: collect all descendant folder IDs (including self) ──────────────
+
+function collectFolderIds(notebooks: Notebook[], rootId: string): string[] {
+  const ids: string[] = [rootId];
+  const queue = [rootId];
+  while (queue.length) {
+    const current = queue.shift()!;
+    const children = notebooks.filter(n => n.parentId === current);
+    for (const child of children) {
+      ids.push(child.id);
+      queue.push(child.id);
+    }
+  }
+  return ids;
+}
+
+// ─── Helper: remove orphan tags (tags with no active notes) ──────────────────
 
 async function pruneOrphanTags(
   remainingNotes: Note[],
@@ -230,7 +246,6 @@ export const useAppStore = create<AppState>()(
             : (partial.charCount ?? existing.charCount),
         };
         await dbSaveNote(updated);
-        // Update wiki links
         if (contentChanged) {
           const allNotes = get().notes;
           const rawLinks = extractWikiLinks(updated.contentMd);
@@ -241,7 +256,6 @@ export const useAppStore = create<AppState>()(
             })
             .filter(Boolean) as { id: string; context: string }[];
           await updateNoteLinks(id, resolvedLinks);
-          // reload outlinks
           const outlinks = await getOutlinks(id);
           set(s => ({
             notes: s.notes.map(n => n.id === id ? updated : n),
@@ -258,7 +272,6 @@ export const useAppStore = create<AppState>()(
         if (!note) return;
         const trashed: Note = { ...note, status: 'trash', updatedAt: Date.now() };
         await dbSaveNote(trashed);
-        // remaining active notes after soft-delete
         const remaining = notes.filter(n => n.id !== id && n.status === 'active');
         const { tags: prunedTags, activeTagId: prunedActiveTagId } =
           await pruneOrphanTags(remaining, tags, activeTagId);
@@ -346,7 +359,6 @@ export const useAppStore = create<AppState>()(
 
       createNotebook: async (name, parentId = null) => {
         const { notebooks } = get();
-        // Enforce max 3 levels: root=1, child=2, grandchild=3
         const parentDepth = getFolderDepth(notebooks, parentId);
         if (parentDepth >= 3) {
           alert('Maximum folder depth is 3 levels.');
@@ -372,13 +384,37 @@ export const useAppStore = create<AppState>()(
       },
 
       deleteNotebook: async (id) => {
-        await db.notebooks.delete(id);
-        // Move notes to null notebook
-        await db.notes.where('notebookId').equals(id).modify({ notebookId: null });
+        const { notebooks, notes, tags, activeTagId } = get();
+
+        // Collect this folder + all descendant folder IDs
+        const folderIds = collectFolderIds(notebooks, id);
+
+        // Permanently delete all notes inside any of those folders
+        const affectedNotes = notes.filter(n => n.notebookId && folderIds.includes(n.notebookId));
+        for (const note of affectedNotes) {
+          await deleteNotePermanently(note.id);
+        }
+
+        // Delete all folders (children first via reverse BFS order)
+        for (const fid of [...folderIds].reverse()) {
+          await db.notebooks.delete(fid);
+        }
+
+        // Remaining notes after deletion
+        const affectedIds = new Set(affectedNotes.map(n => n.id));
+        const remainingNotes = notes.filter(n => !affectedIds.has(n.id));
+
+        // Prune orphan tags
+        const { tags: prunedTags, activeTagId: prunedActiveTagId } =
+          await pruneOrphanTags(remainingNotes, tags, activeTagId);
+
         set(s => ({
-          notebooks: s.notebooks.filter(n => n.id !== id),
-          notes: s.notes.map(n => n.notebookId === id ? { ...n, notebookId: null } : n),
-          activeNotebookId: s.activeNotebookId === id ? null : s.activeNotebookId,
+          notebooks: s.notebooks.filter(n => !folderIds.includes(n.id)),
+          notes: remainingNotes,
+          tags: prunedTags,
+          activeTagId: prunedActiveTagId,
+          activeNoteId: s.activeNoteId && affectedIds.has(s.activeNoteId) ? null : s.activeNoteId,
+          activeNotebookId: s.activeNotebookId && folderIds.includes(s.activeNotebookId) ? null : s.activeNotebookId,
         }));
       },
 
@@ -386,7 +422,6 @@ export const useAppStore = create<AppState>()(
 
       createTag: async (name, color) => {
         const now = Date.now();
-        // Check for existing
         const existing = get().tags.find(t => t.name.toLowerCase() === name.toLowerCase());
         if (existing) return existing;
         const tag: Tag = {
@@ -407,7 +442,6 @@ export const useAppStore = create<AppState>()(
 
       deleteTag: async (id) => {
         await db.tags.delete(id);
-        // Remove from all notes
         const affected = get().notes.filter(n => n.tags.includes(id));
         for (const note of affected) {
           const updated = { ...note, tags: note.tags.filter(t => t !== id), updatedAt: Date.now() };
@@ -436,7 +470,6 @@ export const useAppStore = create<AppState>()(
         const updated = { ...note, tags: note.tags.filter(t => t !== tagId), updatedAt: Date.now() };
         await dbSaveNote(updated);
         const updatedNotes = notes.map(n => n.id === noteId ? updated : n);
-        // Prune tag if no active note uses it anymore
         const stillUsed = updatedNotes.some(n => n.status === 'active' && n.tags.includes(tagId));
         if (!stillUsed) {
           await db.tags.delete(tagId);
