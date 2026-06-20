@@ -31,7 +31,7 @@ export function generateFrontmatter(note: Note, tagNames: string[], folderPath?:
   return lines.join('\n');
 }
 
-// ─── Build folder path string (e.g. "Work/Projects/Alpha") ───────────────────
+// ─── Build folder path string ─────────────────────────────────────────────────
 
 export function buildFolderPath(notebooks: Notebook[], notebookId: string | null): string | undefined {
   if (!notebookId) return undefined;
@@ -179,40 +179,6 @@ export function parseMarkdownFile(
   };
 }
 
-// ─── Resolve/create a folder path — reuse existing folders, create missing ones
-// Deduplicates: if a folder with the same name+parent already exists, reuse it.
-
-export async function resolveOrCreateFolderPath(
-  path: string,
-  notebooks: Notebook[],
-  createNotebook: (name: string, parentId?: string | null) => Promise<{ id: string } | null>
-): Promise<string | null> {
-  const parts = path.split('/').map(p => p.trim()).filter(Boolean);
-  if (!parts.length) return null;
-
-  let parentId: string | null = null;
-  // We mutate a local copy so newly-created notebooks are visible in subsequent iterations
-  let currentNotebooks = [...notebooks];
-
-  for (const part of parts) {
-    // Case-insensitive dedup: reuse existing folder at this level
-    const existing = currentNotebooks.find(
-      n => n.name.toLowerCase() === part.toLowerCase() && (n.parentId ?? null) === parentId
-    );
-    if (existing) {
-      parentId = existing.id;
-    } else {
-      // Create only if it doesn't already exist
-      const created = await createNotebook(part, parentId);
-      if (!created) return null; // depth limit hit
-      parentId = created.id;
-      // Add to local copy so next part can reference it
-      currentNotebooks = [...currentNotebooks, created as Notebook];
-    }
-  }
-  return parentId;
-}
-
 // ─── JSON Import ──────────────────────────────────────────────────────────────
 
 export function parseJsonBackup(content: string): JsonBackup | null {
@@ -240,7 +206,7 @@ export function sanitizeFilename(name: string): string {
   return name.replace(/[<>:"/\\|?*\0]/g, '_').slice(0, 100) || 'untitled';
 }
 
-// ─── Topological sort notebooks: parents before children ──────────────────────
+// ─── Topological sort notebooks: parents before children ─────────────────────
 export function topologicalSortNotebooks(notebooks: { id: string; parentId?: string | null; name: string }[]) {
   const result: typeof notebooks = [];
   const visited = new Set<string>();

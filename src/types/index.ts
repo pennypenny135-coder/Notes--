@@ -1,15 +1,34 @@
-// ─── Core Data Types ───────────────────────────────────────────────────────
+// ─── Note ─────────────────────────────────────────────────────────────────────
+
+export interface Note {
+  id: string;
+  title: string;
+  contentMd: string;
+  notebookId: string | null;
+  tags: string[];
+  status: 'active' | 'archived' | 'trash';
+  isPinned: boolean;
+  isFavorite: boolean;
+  source?: string;
+  wordCount: number;
+  charCount: number;
+  createdAt: number;
+  updatedAt: number;
+  openedAt: number;
+  sortOrder: number;
+}
+
+// ─── Notebook / Folder ────────────────────────────────────────────────────────
 
 export interface Notebook {
   id: string;
   name: string;
   parentId: string | null;
-  color?: string;
-  icon?: string;
-  createdAt: number;
-  updatedAt: number;
   sortOrder: number;
+  createdAt: number;
 }
+
+// ─── Tag ──────────────────────────────────────────────────────────────────────
 
 export interface Tag {
   id: string;
@@ -17,6 +36,8 @@ export interface Tag {
   color?: string;
   createdAt: number;
 }
+
+// ─── Attachment ───────────────────────────────────────────────────────────────
 
 export interface Attachment {
   id: string;
@@ -28,76 +49,27 @@ export interface Attachment {
   createdAt: number;
 }
 
-export interface NoteLink {
-  id: string;
-  fromNoteId: string;
-  toNoteId: string;
-  context?: string; // surrounding text snippet
-  createdAt: number;
-}
+// ─── UI / Store ───────────────────────────────────────────────────────────────
 
-export type NoteStatus = 'active' | 'draft' | 'archived' | 'trash';
-
-export interface Note {
-  id: string;
-  title: string;
-  contentMd: string;
-  notebookId: string | null;
-  status: NoteStatus;
-  isPinned: boolean;
-  isFavorite: boolean;
-  tags: string[]; // tag ids
-  source?: string;
-  wordCount: number;
-  charCount: number;
-  createdAt: number;
-  updatedAt: number;
-  openedAt: number;
-  sortOrder: number;
-}
-
-// ─── UI State Types ─────────────────────────────────────────────────────────
-
-export type SidebarView = 'notebooks' | 'tags' | 'all' | 'favorites' | 'recent' | 'trash';
-
-export type EditorMode = 'split' | 'edit' | 'preview';
-
-export type SortOrder = 'updatedAt' | 'createdAt' | 'title' | 'wordCount';
-export type SortDir = 'asc' | 'desc';
-
-export interface SearchFilter {
-  query: string;
-  tag?: string;
-  notebook?: string;
-  titleOnly?: boolean;
-}
+export type SidebarView = 'all' | 'recent' | 'favorites' | 'notebooks' | 'tags' | 'trash';
 
 export interface AppSettings {
   theme: 'light' | 'dark' | 'system';
-  editorMode: EditorMode;
   fontSize: number;
-  fontFamily: 'mono' | 'sans' | 'serif';
+  fontFamily: string;
   lineHeight: number;
-  autosaveInterval: number; // ms
-  showWordCount: boolean;
-  showLineNumbers: boolean;
   sidebarWidth: number;
-  listWidth: number;
-  defaultNotebookId: string | null;
-  spellcheck: boolean;
-}
-
-// ─── Import / Export ────────────────────────────────────────────────────────
-
-export interface ExportOptions {
-  format: 'markdown' | 'json' | 'zip';
-  includeAttachments: boolean;
-  includeMetadata: boolean;
-  noteIds?: string[]; // if undefined, export all
+  editorWidth: number;
+  spellCheck: boolean;
+  autoSave: boolean;
+  autoSaveInterval: number;
+  showWordCount: boolean;
+  defaultView: SidebarView;
 }
 
 export interface ImportResult {
   imported: number;
+  updated?: number;
   skipped: number;
   errors: string[];
 }

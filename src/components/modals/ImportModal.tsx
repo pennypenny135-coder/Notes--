@@ -1,13 +1,12 @@
 import React, { useRef, useState } from 'react';
-import { Upload, X, FolderOpen, AlertCircle, CheckCircle, Trash2, PlusCircle } from 'lucide-react';
+import { Upload, X, FolderOpen, AlertCircle, CheckCircle, Trash2, PlusCircle, RefreshCw } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import {
   readFileAsText, parseMarkdownFile, parseJsonBackup,
-  resolveOrCreateFolderPath
 } from '../../utils/importExport';
 import { cn } from '../../utils/cn';
 import { db } from '../../db/database';
-import type { ImportResult } from '../../types';
+import type { ImportResult, Notebook } from '../../types';
 
 interface Props {
   onClose: () => void;
@@ -15,10 +14,71 @@ interface Props {
 
 type ImportMode = 'merge' | 'replace';
 
+// ─── Topological sort: parents before children ────────────────────────────────
+function topologicalSortNotebooks(notebooks: { id: string; parentId?: string | null; name: string }[]) {
+  const result: typeof notebooks = [];
+  const visited = new Set<string>();
+  const visit = (nb: typeof notebooks[0]) => {
+    if (visited.has(nb.id)) return;
+    if (nb.parentId) {
+      const parent = notebooks.find(n => n.id === nb.parentId);
+      if (parent) visit(parent);
+    }
+    visited.add(nb.id);
+    result.push(nb);
+  };
+  notebooks.forEach(visit);
+  return result;
+}
+
+// ─── Resolve/create a folder path, keeping a local cache so the SAME import
+//     batch doesn't create duplicate folders across multiple files.
+async function resolveOrCreateFolderPath(
+  path: string,
+  liveNotebooks: Notebook[],               // passed in by reference; caller keeps this in sync
+  localCache: Map<string, string>,          // "name|parentId" → notebookId, accumulated this import run
+  createNotebook: (name: string, parentId?: string | null) => Promise<{ id: string } | null>
+): Promise<string | null> {
+  const parts = path.split('/').map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return null;
+
+  let parentId: string | null = null;
+
+  for (const part of parts) {
+    const cacheKey = `${part.toLowerCase()}|${parentId ?? ''}`;
+
+    // 1. Check our in-run cache first (handles multiple files in the same batch)
+    if (localCache.has(cacheKey)) {
+      parentId = localCache.get(cacheKey)!;
+      continue;
+    }
+
+    // 2. Check existing notebooks in the store (handles re-import across sessions)
+    const existing = liveNotebooks.find(
+      n => n.name.toLowerCase() === part.toLowerCase() && (n.parentId ?? null) === parentId
+    );
+    if (existing) {
+      localCache.set(cacheKey, existing.id);
+      parentId = existing.id;
+      continue;
+    }
+
+    // 3. Create it
+    const created = await createNotebook(part, parentId);
+    if (!created) return null;
+    localCache.set(cacheKey, created.id);
+    // Append to the live list so subsequent parts in this path can find it
+    liveNotebooks.push(created as Notebook);
+    parentId = created.id;
+  }
+
+  return parentId;
+}
+
 export function ImportModal({ onClose }: Props) {
   const {
-    createNote, createTag, addTagToNote, createNotebook,
-    notes, notebooks, loadAll, deleteNote, permanentlyDeleteNote
+    createNote, updateNote, createTag, addTagToNote, createNotebook,
+    notes, notebooks, loadAll, permanentlyDeleteNote
   } = useAppStore();
 
   const [dragging, setDragging] = useState(false);
@@ -30,34 +90,51 @@ export function ImportModal({ onClose }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
-  // Get latest notebooks from store at call time (inside async fn)
-  const getNotebooks = () => useAppStore.getState().notebooks;
-
   const doImportMarkdown = async (files: File[]) => {
     setLoading(true);
-    let imported = 0, skipped = 0;
+    let imported = 0, updated = 0, skipped = 0;
     const errors: string[] = [];
     const currentNotes = useAppStore.getState().notes;
+
+    // Share one folder-dedup cache across ALL files in this batch
+    const folderCache = new Map<string, string>();
+    // Use a mutable copy so newly-created notebooks are visible within this batch
+    const liveNotebooks = [...useAppStore.getState().notebooks];
 
     for (const file of files) {
       try {
         const content = await readFileAsText(file);
         const { note: noteData, tagNames, folderPath } = parseMarkdownFile(content, file.name);
 
-        // Skip duplicates only in merge mode
-        if (mode === 'merge') {
-          const exists = currentNotes.find(n => n.title.toLowerCase() === noteData.title.toLowerCase() && n.status !== 'trash');
-          if (exists) { skipped++; continue; }
-        }
-
-        // Resolve folder
+        // Resolve folder (deduped)
         let notebookId: string | null = null;
         if (folderPath) {
-          notebookId = await resolveOrCreateFolderPath(folderPath, getNotebooks(), createNotebook);
+          notebookId = await resolveOrCreateFolderPath(folderPath, liveNotebooks, folderCache, createNotebook);
+        }
+
+        if (mode === 'merge') {
+          const existing = currentNotes.find(
+            n => n.title.toLowerCase() === noteData.title.toLowerCase() && n.status !== 'trash'
+          );
+          if (existing) {
+            // Compare content — if different, update
+            const contentChanged = existing.contentMd.trim() !== noteData.contentMd.trim();
+            if (contentChanged) {
+              await updateNote(existing.id, {
+                contentMd: noteData.contentMd,
+                wordCount: noteData.wordCount,
+                charCount: noteData.charCount,
+                updatedAt: Date.now(),
+              });
+              updated++;
+            } else {
+              skipped++;
+            }
+            continue;
+          }
         }
 
         const note = await createNote({ ...noteData, notebookId });
-
         for (const tagName of tagNames) {
           const tag = await createTag(tagName);
           await addTagToNote(note.id, tag.id);
@@ -68,7 +145,7 @@ export function ImportModal({ onClose }: Props) {
       }
     }
 
-    setResult({ imported, skipped, errors });
+    setResult({ imported, updated, skipped, errors });
     setLoading(false);
     await loadAll();
   };
@@ -80,19 +157,36 @@ export function ImportModal({ onClose }: Props) {
       const backup = parseJsonBackup(content);
       if (!backup) throw new Error('Invalid JSON backup format');
 
-      let imported = 0, skipped = 0;
+      let imported = 0, updated = 0, skipped = 0;
       const errors: string[] = [];
       const currentNotes = useAppStore.getState().notes;
 
-      // Reconstruct notebook tree preserving parent-child order (parents first)
-      const notebookMap = new Map<string, string>(); // old id → new id
+      // Reconstruct notebook tree
+      const notebookMap = new Map<string, string>();
+      const liveNotebooks = [...useAppStore.getState().notebooks];
+      const folderCache = new Map<string, string>();
+
       const sorted = topologicalSortNotebooks(backup.notebooks);
       for (const nb of sorted) {
-        try {
-          const newParentId = nb.parentId ? (notebookMap.get(nb.parentId) ?? null) : null;
-          const created = await createNotebook(nb.name, newParentId);
-          if (created) notebookMap.set(nb.id, created.id);
-        } catch { /* skip */ }
+        const newParentId = nb.parentId ? (notebookMap.get(nb.parentId) ?? null) : null;
+        const cacheKey = `${nb.name.toLowerCase()}|${newParentId ?? ''}`;
+        // Dedup: reuse existing
+        const existing = liveNotebooks.find(
+          n => n.name.toLowerCase() === nb.name.toLowerCase() && (n.parentId ?? null) === newParentId
+        );
+        if (existing) {
+          notebookMap.set(nb.id, existing.id);
+          folderCache.set(cacheKey, existing.id);
+        } else {
+          try {
+            const created = await createNotebook(nb.name, newParentId);
+            if (created) {
+              notebookMap.set(nb.id, created.id);
+              folderCache.set(cacheKey, created.id);
+              liveNotebooks.push(created as Notebook);
+            }
+          } catch { /* skip */ }
+        }
       }
 
       // Import tags
@@ -108,8 +202,22 @@ export function ImportModal({ onClose }: Props) {
       for (const note of backup.notes) {
         try {
           if (mode === 'merge') {
-            const exists = currentNotes.find(n => n.title.toLowerCase() === note.title.toLowerCase() && n.status !== 'trash');
-            if (exists) { skipped++; continue; }
+            const existing = currentNotes.find(
+              n => n.title.toLowerCase() === note.title.toLowerCase() && n.status !== 'trash'
+            );
+            if (existing) {
+              const contentChanged = existing.contentMd.trim() !== (note.contentMd ?? '').trim();
+              if (contentChanged) {
+                await updateNote(existing.id, {
+                  contentMd: note.contentMd,
+                  updatedAt: Date.now(),
+                });
+                updated++;
+              } else {
+                skipped++;
+              }
+              continue;
+            }
           }
 
           const newNote = await createNote({
@@ -132,10 +240,10 @@ export function ImportModal({ onClose }: Props) {
         }
       }
 
-      setResult({ imported, skipped, errors });
+      setResult({ imported, updated, skipped, errors });
       await loadAll();
     } catch (e) {
-      setResult({ imported: 0, skipped: 0, errors: [e instanceof Error ? e.message : 'Import failed'] });
+      setResult({ imported: 0, updated: 0, skipped: 0, errors: [e instanceof Error ? e.message : 'Import failed'] });
     }
     setLoading(false);
   };
@@ -143,13 +251,12 @@ export function ImportModal({ onClose }: Props) {
   const runImport = async (files: File[]) => {
     const mdFiles = files.filter(f => f.name.endsWith('.md') || f.name.endsWith('.markdown'));
     const jsonFiles = files.filter(f => f.name.endsWith('.json'));
-
     if (jsonFiles.length > 0) {
       await doImportJson(jsonFiles[0]);
     } else if (mdFiles.length > 0) {
       await doImportMarkdown(mdFiles);
     } else {
-      setResult({ imported: 0, skipped: 0, errors: ['No supported files found (.md or .json)'] });
+      setResult({ imported: 0, updated: 0, skipped: 0, errors: ['No supported files found (.md or .json)'] });
     }
   };
 
@@ -167,12 +274,8 @@ export function ImportModal({ onClose }: Props) {
     setConfirmReplace(false);
     if (!pendingFiles) return;
     setLoading(true);
-    // Permanently delete all existing notes
     const allNotes = useAppStore.getState().notes;
-    for (const note of allNotes) {
-      await permanentlyDeleteNote(note.id);
-    }
-    // Delete all notebooks & tags
+    for (const note of allNotes) await permanentlyDeleteNote(note.id);
     const allNotebooks = useAppStore.getState().notebooks;
     for (const nb of allNotebooks) {
       try { await db.notebooks.delete(nb.id); } catch { /* ignore */ }
@@ -203,7 +306,7 @@ export function ImportModal({ onClose }: Props) {
         <div className="p-5 space-y-4">
           {!result && !confirmReplace ? (
             <>
-              {/* Import mode */}
+              {/* Mode selector */}
               <div>
                 <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Import Mode</p>
                 <div className="flex gap-2">
@@ -232,7 +335,7 @@ export function ImportModal({ onClose }: Props) {
                 </div>
                 <p className="text-xs text-muted mt-1.5">
                   {mode === 'merge'
-                    ? 'Add imported notes alongside existing ones. Duplicates (by title) are skipped.'
+                    ? 'Same title → update content if changed, skip if identical.'
                     : 'Delete ALL existing notes, folders and tags before importing.'}
                 </p>
               </div>
@@ -294,7 +397,6 @@ export function ImportModal({ onClose }: Props) {
               </div>
             </>
           ) : confirmReplace ? (
-            /* Replace confirm */
             <div className="space-y-4">
               <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-500/10 mx-auto">
                 <Trash2 size={22} className="text-red-500" />
@@ -315,7 +417,6 @@ export function ImportModal({ onClose }: Props) {
               </div>
             </div>
           ) : (
-            /* Result */
             <div className="space-y-3">
               <div className={cn(
                 'flex items-center gap-2 p-3 rounded-lg',
@@ -328,7 +429,9 @@ export function ImportModal({ onClose }: Props) {
                 <div>
                   <p className="text-sm font-medium text-fg">Import complete</p>
                   <p className="text-xs text-muted">
-                    {result!.imported} imported, {result!.skipped} skipped
+                    {result!.imported} imported
+                    {(result!.updated ?? 0) > 0 ? `, ${result!.updated} updated` : ''}
+                    {result!.skipped > 0 ? `, ${result!.skipped} skipped` : ''}
                     {result!.errors.length > 0 ? `, ${result!.errors.length} errors` : ''}
                   </p>
                 </div>
@@ -345,21 +448,4 @@ export function ImportModal({ onClose }: Props) {
       </div>
     </div>
   );
-}
-
-// ─── Topological sort notebooks: parents before children ─────────────────────
-function topologicalSortNotebooks(notebooks: { id: string; parentId?: string | null; name: string }[]) {
-  const result: typeof notebooks = [];
-  const visited = new Set<string>();
-  const visit = (nb: typeof notebooks[0]) => {
-    if (visited.has(nb.id)) return;
-    if (nb.parentId) {
-      const parent = notebooks.find(n => n.id === nb.parentId);
-      if (parent) visit(parent);
-    }
-    visited.add(nb.id);
-    result.push(nb);
-  };
-  notebooks.forEach(visit);
-  return result;
 }
