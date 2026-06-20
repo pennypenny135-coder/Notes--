@@ -122,6 +122,25 @@ function getFolderDepth(notebooks: Notebook[], folderId: string | null): number 
   return depth;
 }
 
+// ─── Helper: remove orphan tags (tags with no active notes) ─────────────────
+
+async function pruneOrphanTags(
+  remainingNotes: Note[],
+  currentTags: Tag[],
+  activeTagId: string | null
+): Promise<{ tags: Tag[]; activeTagId: string | null }> {
+  const usedTagIds = new Set(remainingNotes.flatMap(n => n.tags));
+  const orphans = currentTags.filter(t => !usedTagIds.has(t.id));
+  for (const tag of orphans) {
+    await db.tags.delete(tag.id);
+  }
+  const orphanIds = new Set(orphans.map(t => t.id));
+  return {
+    tags: currentTags.filter(t => !orphanIds.has(t.id)),
+    activeTagId: activeTagId && orphanIds.has(activeTagId) ? null : activeTagId,
+  };
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 export const useAppStore = create<AppState>()(
@@ -234,14 +253,20 @@ export const useAppStore = create<AppState>()(
       },
 
       deleteNote: async (id) => {
-        const { notes } = get();
+        const { notes, tags, activeTagId } = get();
         const note = notes.find(n => n.id === id);
         if (!note) return;
         const trashed: Note = { ...note, status: 'trash', updatedAt: Date.now() };
         await dbSaveNote(trashed);
+        // remaining active notes after soft-delete
+        const remaining = notes.filter(n => n.id !== id && n.status === 'active');
+        const { tags: prunedTags, activeTagId: prunedActiveTagId } =
+          await pruneOrphanTags(remaining, tags, activeTagId);
         set(s => ({
           notes: s.notes.filter(n => n.id !== id),
           activeNoteId: s.activeNoteId === id ? null : s.activeNoteId,
+          tags: prunedTags,
+          activeTagId: prunedActiveTagId,
         }));
       },
 
@@ -254,10 +279,16 @@ export const useAppStore = create<AppState>()(
       },
 
       permanentlyDeleteNote: async (id) => {
+        const { notes, tags, activeTagId } = get();
         await deleteNotePermanently(id);
+        const remaining = notes.filter(n => n.id !== id);
+        const { tags: prunedTags, activeTagId: prunedActiveTagId } =
+          await pruneOrphanTags(remaining, tags, activeTagId);
         set(s => ({
-          notes: s.notes.filter(n => n.id !== id),
+          notes: remaining,
           activeNoteId: s.activeNoteId === id ? null : s.activeNoteId,
+          tags: prunedTags,
+          activeTagId: prunedActiveTagId,
         }));
       },
 
@@ -399,11 +430,24 @@ export const useAppStore = create<AppState>()(
       },
 
       removeTagFromNote: async (noteId, tagId) => {
-        const note = get().notes.find(n => n.id === noteId);
+        const { notes, tags, activeTagId } = get();
+        const note = notes.find(n => n.id === noteId);
         if (!note) return;
         const updated = { ...note, tags: note.tags.filter(t => t !== tagId), updatedAt: Date.now() };
         await dbSaveNote(updated);
-        set(s => ({ notes: s.notes.map(n => n.id === noteId ? updated : n) }));
+        const updatedNotes = notes.map(n => n.id === noteId ? updated : n);
+        // Prune tag if no active note uses it anymore
+        const stillUsed = updatedNotes.some(n => n.status === 'active' && n.tags.includes(tagId));
+        if (!stillUsed) {
+          await db.tags.delete(tagId);
+          set(s => ({
+            notes: updatedNotes,
+            tags: s.tags.filter(t => t.id !== tagId),
+            activeTagId: s.activeTagId === tagId ? null : s.activeTagId,
+          }));
+        } else {
+          set({ notes: updatedNotes });
+        }
       },
 
       // ── Attachments ───────────────────────────────────────────────────────
