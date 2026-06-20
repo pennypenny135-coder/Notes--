@@ -3,7 +3,7 @@ import { Download, X, FileText, Code, Archive, Check } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import {
   exportNoteAsMarkdown, exportAsJson, exportAsZip,
-  downloadText
+  downloadText, buildFolderPath
 } from '../../utils/importExport';
 import { cn } from '../../utils/cn';
 import { db } from '../../db/database';
@@ -16,7 +16,7 @@ type ExportFormat = 'markdown' | 'json' | 'zip';
 
 export function ExportModal({ onClose }: Props) {
   const { notes, notebooks, tags, activeNoteId } = useAppStore();
-  const [format, setFormat] = useState<ExportFormat>('markdown');
+  const [format, setFormat] = useState<ExportFormat>('json');
   const [scope, setScope] = useState<'active' | 'all'>('all');
   const [includeAttachments, setIncludeAttachments] = useState(true);
   const [includeMetadata, setIncludeMetadata] = useState(true);
@@ -37,21 +37,27 @@ export function ExportModal({ onClose }: Props) {
         if (targetNotes.length === 1) {
           const note = targetNotes[0];
           const tagNames = note.tags.map(id => tagMap.get(id) ?? id);
+          const folderPath = buildFolderPath(notebooks, note.notebookId);
           const content = includeMetadata
-            ? exportNoteAsMarkdown(note, tagNames)
+            ? exportNoteAsMarkdown(note, tagNames, folderPath)
             : note.contentMd;
           downloadText(content, `${note.title.replace(/[<>:"/\\|?*]/g, '_')}.md`);
         } else {
-          // Multiple notes: zip of markdown files
           const JSZip = (await import('jszip')).default;
           const zip = new JSZip();
+          const notesFolder = zip.folder('notes')!;
           for (const note of targetNotes) {
             const tagNames = note.tags.map(id => tagMap.get(id) ?? id);
+            const folderPath = buildFolderPath(notebooks, note.notebookId);
             const content = includeMetadata
-              ? exportNoteAsMarkdown(note, tagNames)
+              ? exportNoteAsMarkdown(note, tagNames, folderPath)
               : note.contentMd;
             const safeName = note.title.replace(/[<>:"/\\|?*]/g, '_').slice(0, 100);
-            zip.file(`${safeName}.md`, content);
+            if (folderPath && includeMetadata) {
+              notesFolder.folder(folderPath)!.file(`${safeName}.md`, content);
+            } else {
+              notesFolder.file(`${safeName}.md`, content);
+            }
           }
           const blob = await zip.generateAsync({ type: 'blob' });
           const url = URL.createObjectURL(blob);
@@ -86,22 +92,22 @@ export function ExportModal({ onClose }: Props) {
 
   const formatOptions: { value: ExportFormat; label: string; desc: string; icon: React.ReactNode }[] = [
     {
-      value: 'markdown',
-      label: 'Markdown',
-      desc: 'Plain .md files — works with any editor',
-      icon: <FileText size={18} />,
-    },
-    {
       value: 'json',
       label: 'JSON Backup',
-      desc: 'Full backup including metadata & tags',
+      desc: 'Full backup — folders, tags & metadata preserved',
       icon: <Code size={18} />,
     },
     {
       value: 'zip',
       label: 'ZIP Archive',
-      desc: 'Notes + attachments in one archive',
+      desc: 'Notes in folder structure + attachments',
       icon: <Archive size={18} />,
+    },
+    {
+      value: 'markdown',
+      label: 'Markdown',
+      desc: 'Plain .md files with folder path in frontmatter',
+      icon: <FileText size={18} />,
     },
   ];
 
@@ -112,9 +118,7 @@ export function ExportModal({ onClose }: Props) {
           <h2 className="font-semibold text-fg flex items-center gap-2">
             <Download size={16} className="text-accent" /> Export Notes
           </h2>
-          <button onClick={onClose} className="text-muted hover:text-fg transition-colors">
-            <X size={18} />
-          </button>
+          <button onClick={onClose} className="text-muted hover:text-fg transition-colors"><X size={18} /></button>
         </div>
 
         <div className="p-5 space-y-4">
@@ -133,9 +137,7 @@ export function ExportModal({ onClose }: Props) {
                       : 'border-border hover:border-accent/40 hover:bg-surface-hover text-fg'
                   )}
                 >
-                  <span className={cn('flex-shrink-0', format === opt.value ? 'text-accent' : 'text-muted')}>
-                    {opt.icon}
-                  </span>
+                  <span className={cn('flex-shrink-0', format === opt.value ? 'text-accent' : 'text-muted')}>{opt.icon}</span>
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium">{opt.label}</p>
                     <p className="text-xs text-muted">{opt.desc}</p>
@@ -156,9 +158,7 @@ export function ExportModal({ onClose }: Props) {
                   'flex-1 py-2 rounded-md text-sm border transition-colors',
                   scope === 'all' ? 'border-accent bg-accent/5 text-accent' : 'border-border text-muted hover:border-accent/40'
                 )}
-              >
-                All notes ({activeNotes.length})
-              </button>
+              >All notes ({activeNotes.length})</button>
               {activeNoteId && (
                 <button
                   onClick={() => setScope('active')}
@@ -166,9 +166,7 @@ export function ExportModal({ onClose }: Props) {
                     'flex-1 py-2 rounded-md text-sm border transition-colors',
                     scope === 'active' ? 'border-accent bg-accent/5 text-accent' : 'border-border text-muted hover:border-accent/40'
                   )}
-                >
-                  Current note
-                </button>
+                >Current note</button>
               )}
             </div>
           </div>
@@ -176,35 +174,26 @@ export function ExportModal({ onClose }: Props) {
           {/* Options */}
           <div className="space-y-2">
             <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={includeMetadata}
-                onChange={e => setIncludeMetadata(e.target.checked)}
-                className="accent-accent"
-              />
+              <input type="checkbox" checked={includeMetadata} onChange={e => setIncludeMetadata(e.target.checked)} className="accent-accent" />
               <span className="text-sm text-fg">Include frontmatter metadata</span>
             </label>
             {(format === 'json' || format === 'zip') && (
               <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={includeAttachments}
-                  onChange={e => setIncludeAttachments(e.target.checked)}
-                  className="accent-accent"
-                />
+                <input type="checkbox" checked={includeAttachments} onChange={e => setIncludeAttachments(e.target.checked)} className="accent-accent" />
                 <span className="text-sm text-fg">Include attachments</span>
               </label>
             )}
+          </div>
+
+          <div className="bg-surface-hover rounded-lg p-3">
+            <p className="text-xs text-muted">📁 Folder structure and tags are always preserved in JSON &amp; ZIP exports. Markdown exports include the folder path in frontmatter.</p>
           </div>
 
           {/* Export button */}
           <button
             onClick={handleExport}
             disabled={loading || done}
-            className={cn(
-              'btn-primary w-full flex items-center justify-center gap-2 py-2.5',
-              done && 'bg-green-500 hover:bg-green-500'
-            )}
+            className={cn('btn-primary w-full flex items-center justify-center gap-2 py-2.5', done && 'bg-green-500 hover:bg-green-500')}
           >
             {loading ? (
               <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
